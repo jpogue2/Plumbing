@@ -1,102 +1,144 @@
-// Pin configuration
-const int LED_PIN = 46;
-const int BUZZER_PIN = 36;
-const int VIBRATION_PIN = 26;
-const int HALL_SENSOR_PIN = A4;  // Analog hall sensor input
+#include <Arduino.h>
 
-// Threshold for analog hall sensor (tune as needed)
-const int HALL_THRESHOLD = 20;
+#define NUM_HOLES 7
 
-enum GameState {
-  WAITING_FOR_PLUG,
-  PLUGGING,
-  PLUGGED
+const int ledPins[NUM_HOLES]      = {46, 47, 48, 49, 50, 51, 52};
+const int buzzerPins[NUM_HOLES]   = {36, 37, 38, 39, 40, 41, 42};
+const int vibePins[NUM_HOLES]     = {26, 27, 28, 29, 30, 31, 32};
+const int hallPins[NUM_HOLES]     = {A0, A1, A2, A3, A4, A5, A6};
+
+// 🎵 Per-hole buzzer frequencies (Hz)
+const int buzzerFrequencies[NUM_HOLES] = {
+  2500, 1100, 1200, 1300, 1400, 1500, 1600
 };
 
-GameState state = WAITING_FOR_PLUG;
-unsigned long stateStartTime = 0;
-unsigned char playingVictory = false;
+const int HALL_THRESHOLD = 20;
+const unsigned long HOLE_LIFETIME = 10000;
+const unsigned long PLUG_TIME_REQUIRED = 2000;
+
+const int UNPLUGGED_BUFFER_SIZE = 5;
+bool unpluggedBuffer[NUM_HOLES][UNPLUGGED_BUFFER_SIZE] = {false};
+int unpluggedIndex[NUM_HOLES] = {0};
+
+enum GameState { WAITING_FOR_PLUG, PLUGGING, PLUGGED };
+
+GameState states[NUM_HOLES];
+unsigned long stateStartTime[NUM_HOLES];
+bool playingVictory[NUM_HOLES];
+
+unsigned long lastHoleSelectTime = 0;
+const unsigned long HOLE_SELECT_INTERVAL = 4000;
 
 void setup() {
-  pinMode(LED_PIN, OUTPUT);
-  pinMode(BUZZER_PIN, OUTPUT);  // Required for tone(), even though tone handles PWM
-  pinMode(VIBRATION_PIN, OUTPUT);
-  pinMode(HALL_SENSOR_PIN, INPUT);
-
   Serial.begin(9600);
-  Serial.println("Game started.");
+  for (int i = 0; i < NUM_HOLES; i++) {
+    pinMode(ledPins[i], OUTPUT);
+    pinMode(buzzerPins[i], OUTPUT);
+    pinMode(vibePins[i], OUTPUT);
+    pinMode(hallPins[i], INPUT);
+    states[i] = PLUGGED;
+    stateStartTime[i] = millis();
+    playingVictory[i] = false;
+    for (int j = 0; j < UNPLUGGED_BUFFER_SIZE; j++) {
+      unpluggedBuffer[i][j] = false;
+    }
+  }
+  randomSeed(analogRead(A7));
 }
 
 void loop() {
-  int hallValue = analogRead(HALL_SENSOR_PIN);
-  bool isPlugged = hallValue < HALL_THRESHOLD;
-
-  Serial.print("Hall sensor value: ");
-  Serial.println(hallValue);
-
   unsigned long now = millis();
 
-  switch (state) {
-    case WAITING_FOR_PLUG: {
-      // Blink LED and beep buzzer
-      digitalWrite(VIBRATION_PIN, HIGH);
-      unsigned long blinkPhase = now % 1000;
-      bool blink = blinkPhase < 100;
-
-      digitalWrite(LED_PIN, blink);
-      if (blink) {
-        tone(BUZZER_PIN, 1000);  // 1kHz beep
-      } else {
-        noTone(BUZZER_PIN);
+  // Randomly activate a new hole every 4 seconds
+  if (now - lastHoleSelectTime >= HOLE_SELECT_INTERVAL) {
+    lastHoleSelectTime = now;
+    int attempts = 0;
+    while (attempts < 10) {
+      int idx = random(NUM_HOLES);
+      if (states[idx] == PLUGGED) {
+        states[idx] = WAITING_FOR_PLUG;
+        stateStartTime[idx] = now;
+        Serial.print("Activating hole ");
+        Serial.println(idx);
+        break;
       }
-
-      if (isPlugged) {
-        state = PLUGGING;
-        stateStartTime = now;
-        Serial.println("Started plugging...");
-      }
-      break;
+      attempts++;
     }
+  }
 
-    case PLUGGING: {
-      digitalWrite(LED_PIN, HIGH);
-      noTone(BUZZER_PIN);
-      digitalWrite(VIBRATION_PIN, HIGH);
+  // Update each hole
+  for (int i = 0; i < NUM_HOLES; i++) {
+    int hallValue = analogRead(hallPins[i]);
+    bool isPlugged = hallValue < HALL_THRESHOLD;
 
-      if (!isPlugged) {
-        Serial.println("Plug removed too early.");
-        state = WAITING_FOR_PLUG;
-        noTone(BUZZER_PIN);
-      } else if (now - stateStartTime >= 2000) {
-        Serial.println("Hole plugged successfully!");
-        state = PLUGGED;
-        stateStartTime = now;
-        playingVictory = true;
-      }
-      break;
-    }
+    switch (states[i]) {
+      case WAITING_FOR_PLUG: {
+        digitalWrite(vibePins[i], HIGH);
+        bool blink = (now % 1000) < 100;
+        digitalWrite(ledPins[i], blink);
+        if (blink) tone(buzzerPins[i], buzzerFrequencies[i]);
+        else noTone(buzzerPins[i]);
 
-    case PLUGGED: {
-      digitalWrite(LED_PIN, LOW);
-      digitalWrite(VIBRATION_PIN, LOW);
+        if (isPlugged) {
+          states[i] = PLUGGING;
+          stateStartTime[i] = now;
+          Serial.print("Started plugging hole ");
+          Serial.println(i);
 
-      if ((now - stateStartTime) >= 300 && playingVictory) {
-        noTone(BUZZER_PIN);
-        playingVictory = false;
-      } else if ((now - stateStartTime) >= 200 && playingVictory) {
-        tone(BUZZER_PIN, 1000);
-      } else if ((now - stateStartTime) >= 100 && playingVictory) {
-        noTone(BUZZER_PIN);
-      } else if (playingVictory) {
-        tone(BUZZER_PIN, 1000);
+          for (int j = 0; j < UNPLUGGED_BUFFER_SIZE; j++) {
+            unpluggedBuffer[i][j] = false;
+          }
+          unpluggedIndex[i] = 0;
+        }
+        break;
       }
 
-      if (now - stateStartTime >= 10000) {
-        Serial.println("Restarting game.");
-        noTone(BUZZER_PIN);
-        state = WAITING_FOR_PLUG;
+      case PLUGGING: {
+        digitalWrite(ledPins[i], HIGH);
+        digitalWrite(vibePins[i], HIGH);
+        noTone(buzzerPins[i]);
+
+        unpluggedBuffer[i][unpluggedIndex[i]] = !isPlugged;
+        unpluggedIndex[i] = (unpluggedIndex[i] + 1) % UNPLUGGED_BUFFER_SIZE;
+
+        int unpluggedCount = 0;
+        for (int j = 0; j < UNPLUGGED_BUFFER_SIZE; j++) {
+          if (unpluggedBuffer[i][j]) unpluggedCount++;
+        }
+
+        if (unpluggedCount == UNPLUGGED_BUFFER_SIZE) {
+          states[i] = WAITING_FOR_PLUG;
+          noTone(buzzerPins[i]);
+          Serial.print("Plug removed too early at hole ");
+          Serial.println(i);
+        } else if (now - stateStartTime[i] >= PLUG_TIME_REQUIRED) {
+          states[i] = PLUGGED;
+          stateStartTime[i] = now;
+          playingVictory[i] = true;
+          Serial.print("Hole ");
+          Serial.print(i);
+          Serial.println(" plugged!");
+        }
+        break;
       }
-      break;
+
+      case PLUGGED: {
+        digitalWrite(ledPins[i], LOW);
+        digitalWrite(vibePins[i], LOW);
+
+        unsigned long elapsed = now - stateStartTime[i];
+        if (elapsed >= 450 && playingVictory[i]) {
+          noTone(buzzerPins[i]);
+          playingVictory[i] = false;
+        } else if (elapsed >= 300 && playingVictory[i]) {
+          tone(buzzerPins[i], buzzerFrequencies[i]);
+        } else if (elapsed >= 150 && playingVictory[i]) {
+          noTone(buzzerPins[i]);
+        } else if (playingVictory[i]) {
+          tone(buzzerPins[i], buzzerFrequencies[i]);
+        }
+        break;
+      }
     }
   }
 }
